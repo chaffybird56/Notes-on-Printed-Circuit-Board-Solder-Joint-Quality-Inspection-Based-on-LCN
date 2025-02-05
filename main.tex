@@ -1,0 +1,360 @@
+
+\documentclass{article}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage{textcomp}
+\usepackage{lastpage}
+\usepackage{graphicx}
+\usepackage[margin=1in]{geometry}
+\usepackage{setspace}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{hyperref}
+\usepackage{url}
+\title{Notes on ``Printed Circuit Board Solder Joint Quality Inspection Based on Lightweight Classification Network''}
+\author{Ahmad Choudhry}
+\date{February 3, 2025\\\\
+\url{https://ietresearch.onlinelibrary.wiley.com/doi/epdf/10.1049/csy2.12101}}
+
+\begin{document}
+
+\maketitle
+
+\section{Introduction}
+
+These notes explore the paper 
+\emph{``Printed circuit board solder joint quality inspection based on lightweight classification network''} 
+by Zhang \emph{et al.} 
+We (i.e., our team) intend to apply these ideas to a \textbf{real-time soldering robot project}, 
+where the robot can inspect each joint right after soldering, decide if it is defective, and attempt corrections. 
+Our roadmap includes first creating a simple \emph{binary} good/bad model, 
+then building up to more advanced \emph{multi-class defect detection} with real-time feedback.
+
+\section{Context and Motivation}
+
+Solder joints are critical connections on a PCB. 
+Defective joints can cause intermittent or outright failures. 
+Manually inspecting every joint can be slow and prone to human error, 
+so \textbf{automatic visual inspection} is a desirable solution.
+
+Zhang \emph{et al.} propose a pipeline with two main parts:
+\begin{enumerate}
+   \item A specialized \textbf{segmentation} method (the ``Select Joint'' approach) to locate each solder joint on the PCB.
+   \item A \textbf{lightweight classification network} (``MobileXT'') that determines whether the extracted soldered joint is normal (i.e good) or belongs to a specific defect category.
+\end{enumerate}
+
+\section{Paper’s Proposed Pipeline: Overview}
+
+\begin{itemize}
+    \item \emph{Stage 1:} \textbf{Solder Joint Segmentation} using morphological and color-based thresholding in the HSV color space. 
+    \item \emph{Stage 2:} \textbf{MobileXT Classification} which combines a \textbf{CNN} (for local features) and a \textbf{Transformer} component (for global context).
+\end{itemize}
+
+These two steps together form a system that can achieve very high accuracy while staying small enough to run efficiently on typical GPUs or even on embedded devices.
+
+\section{Stage 1: Solder Joint Segmentation (``Select Joint'')}
+\label{sec:stage1}
+
+We now go step by step through their segmentation process. 
+
+\subsection{High-Level Idea of Use-case For Our Project}
+
+We are given PCB image containing many solder joints from the Vision System. 
+We want to extract sub-images (``patches''), each containing exactly one solder joint. 
+Once we have those patches, we can feed them into a classification model instead of running detection on the entire large image which would increase computational complexity and time taken for response
+
+\subsection{Histogram Equalization}
+
+We first apply \textbf{histogram equalization} to make the image’s overall brightness more uniform. 
+Imagine we had an image that was very dark in some areas and bright in others. 
+Histogram equalization redistributes pixel intensities (balancing contrast frequencies) so that we do not have extreme shadows or highlights. 
+It can help the subsequent thresholding steps pick out solder more consistently.
+
+\subsection{BGR to HSV Conversion}
+
+Standard images come in \textbf{BGR} or \textbf{RGB} format. 
+However, \textbf{HSV} (Hue, Saturation, Value) is more convenient for separating color tones. 
+\begin{itemize}
+    \item \textbf{Hue}: The \emph{type} of color (e.g., red, green, or blue).
+    \item \textbf{Saturation}: How intense or grayish the color appears. How vivid the colour appears. A low saturation is a washed-out pixel.
+    \item \textbf{Value}: The brightness level. High value is bright, low value is dark.
+\end{itemize}
+Solder joints often have particular \emph{Hue} and \emph{Value} traits that differ from the rest of the PCB background. 
+Hence, we convert our image into HSV.
+
+\subsection{Otsu’s Thresholding on Hue Channel}
+\label{sec:otsu}
+
+\paragraph{What is Otsu’s Method?}
+Otsu’s method is a technique for finding a \textbf{single} intensity threshold that separates an image into \emph{foreground} and \emph{background} 
+by maximizing the difference between these two sets. See WikiPedia Article.
+While it may sound intimidating, the core idea is:
+
+\begin{enumerate}
+    \item We guess a threshold $T$ for the pixel intensities.
+    \item Pixels with intensity \emph{less than or equal} to $T$ form one group (Group 1), 
+          and pixels \emph{greater than} $T$ form another group (Group 2).
+    \item We measure how \emph{distinct} these two groups are by using a formula called the \emph{between-class variance}.
+    \item We adjust $T$ to see where this between-class variance is maximized.
+\end{enumerate}
+
+Mathematically, if our hue channel is considered a grayscale image $I$, and $I(i,j)$ is the intensity at pixel $(i,j)$, 
+we define:
+\[
+  \omega_1(T) = \frac{\text{number of pixels }(i,j)\text{ with }I(i,j) \le T}{\text{total pixel count}},
+  \quad
+  \omega_2(T) = 1 - \omega_1(T).
+\]
+\[
+  \mu_1(T) = \text{mean intensity of pixels }\le T,
+  \quad
+  \mu_2(T) = \text{mean intensity of pixels }> T.
+\]
+\[
+  \mu_{\text{total}} = \text{mean intensity of all pixels}.
+\]
+The \textbf{between-class variance} is:
+\[
+  \text{Var}_{\text{between}}(T) = 
+  \omega_1(T)\,[\mu_1(T) - \mu_{\text{total}}]^2
+  \;+\;
+  \omega_2(T)\,[\mu_2(T) - \mu_{\text{total}}]^2.
+\]
+Otsu’s algorithm quickly tries all possible $T$ (e.g., from 0 to 255 in an 8-bit image) and picks the one that maximizes $\text{Var}_{\text{between}}(T)$. 
+
+\paragraph{How Does This Help Us?}
+The authors apply Otsu’s threshold on the \textbf{Hue channel} to decide which pixels might correspond to solder (foreground) 
+versus the PCB substrate or other areas (background). 
+Because solder often has a specific \emph{Hue} range, Otsu’s method can \emph{automatically} find a good cutoff for that hue distribution.
+
+\subsection{Low-Threshold Gating on Value Channel }
+
+Now, we also look at the \textbf{Value channel} (brightness). 
+While Hue can separate color, the brightness might also be a clue. 
+If we want to capture areas that are \emph{shiny} or \emph{reflective}, we might say: 
+\[
+   \text{If }V \geq T_V,\text{ keep the pixel as potential solder.}
+\]
+This is called a \textbf{gating} step because we are effectively gating or filtering out pixels that do not meet a brightness criterion. 
+(The paper calls it ``low threshold gating'' if it is focusing on eliminating super-dark regions or ensuring we only keep bright-enough pixels.)
+
+\paragraph{Why Combine Hue and Value?}
+Just thresholding Hue alone might include certain reflections that are not solder, or it might exclude some solder in weird lighting. 
+By also checking Value, we strengthen our confidence that the pixel is truly solder material. 
+
+\subsection{Merging Masks \& Median Filtering }
+\label{sec:maskmerge}
+
+After we create two separate binary masks (one from the Hue threshold, one from the Value threshold), 
+we \textbf{merge} them with a logical AND or OR (depending on how the authors configure it). 
+For instance:
+
+\[
+   \text{CombinedMask}(i,j) 
+   = \text{MaskHue}(i,j) \;\wedge\; \text{MaskValue}(i,j).
+\]
+
+But thresholding alone can produce small ``specks'' of noise. 
+Hence, the authors do a \textbf{median filter}: 
+\[
+   \text{FilteredMask}(i,j) 
+   = \mathrm{median}
+   \left\{
+      \text{CombinedMask}(u,v)\;\mid\;
+      (u,v)\text{ in a small neighborhood around }(i,j)
+   \right\}.
+\]
+This step basically \emph{smooths} the binary image so isolated 1-pixel or 2-pixel outliers vanish.
+
+\subsection{Contour Detection \& Bounding Boxes }
+
+Finally, we detect \emph{contours} in the cleaned mask. 
+Each connected blob presumably corresponds to a solder joint. 
+Using \texttt{findContours} (OpenCV) or a similar function, we can get the bounding rectangle for each blob:
+\[
+   (x_{\min},\,y_{\min},\,\text{width},\,\text{height}).
+\]
+We discard outliers (extremely large or small boxes) and keep the rest. 
+These boxes tell us where to \emph{crop} the original image, producing small patches focused on each solder joint.
+
+\section{Stage 2: MobileXT Classification }
+
+Now that each solder joint is isolated, we feed that \emph{cropped patch} (resized to something like 256$\times$256) into a \textbf{classification network}. 
+The network used by the Research Paper is \textbf{MobileXT}, a small but powerful hybrid that merges CNN and Transformer elements.
+
+\subsection{Why a Hybrid CNN-Transformer? }
+
+\begin{itemize}
+    \item \textbf{CNNs}: Good at local pattern detection. Convolution filters pick up edges, corners, small shapes.
+    \item \textbf{Transformers}: Use \emph{attention} to capture \emph{global relationships} (e.g., how different parts of the image relate to each other, even if they are far apart).
+\end{itemize}
+
+MobileXT tries to keep the parameter count low (in the range of 1--5 million parameters), 
+so it can be run quickly and still achieve high classification accuracy.
+
+\subsection{MobileXT Overview}
+
+\textbf{MobileXT} stands for \textit{Mobile} (small, efficient) + \textit{X} (cross-covariance) + \textit{T} (Transformer). 
+This section in the original paper has the following components:
+
+\subsubsection{CNN Backbone}
+
+They begin with a \textbf{convolutional stem} (like a $3\times 3$ conv with stride 2) and then multiple \emph{inverted residual} blocks (inspired by MobileNet). See Figure 3 in the original paper. A 3x3 conv with stride 2 means a convolutional layer that uses a 3x3 filter (kernel) to slide across the input data, but with a stride of 2, which means the filter jumps ahead by two pixels at each step instead of one, effectively reducing the size of the output feature map by downsampling the input data.  
+The inverted residual blocks do the following:
+\begin{enumerate}
+    \item \textbf{Channel expansion}: Multiply the channels by some factor.
+    \item \textbf{Depthwise convolution}: Apply a separate convolution filter for each channel (reducing parameter count).
+    \item \textbf{Channel projection}: Bring the channels back down to a smaller number.
+    \item \textbf{Skip connection}: Add the original input if shapes match.
+\end{enumerate}
+You can look more into MobileXT CNN architecture online.
+\subsubsection{Cross-Covariance Attention (XCA)}
+
+The \textbf{Transformer} portion uses an \emph{attention} mechanism that tries to identify which parts of the image are relevant to other parts. 
+However, the authors do not use a standard \emph{self-attention} 
+(which can have a high computational cost of about $O(n^2 d)$). 
+Instead, they use \textbf{XCA (Cross-Covariance Attention)}, which we will expand on in Section~\ref{sec:xca}. 
+
+\subsubsection{Fusion Layer}
+
+After we get local (CNN) features and global (XCA) features, MobileXT merges them (e.g., by concatenation or addition) 
+and then applies another $3\times 3$ convolution or pointwise convolution to \emph{fuse} everything into a single coherent feature map. 
+Finally, it does \textbf{global average pooling} and a \textbf{fully connected layer} to output classification logits (the final defect categories).
+
+\section{Dataset and Experiments}
+
+\subsection{Data Collection }
+
+The authors took 93 PCBs, used their \emph{Select Joint} approach to crop out \textbf{1,804} solder-joint patches, 
+and labeled each patch in \textbf{7} categories: 
+\emph{Normal, Miss, Bridging, Tip, Littletin, Polytin, Rosin.}
+
+They split the dataset 80\%/10\%/10\% for train/val/test. 
+They then trained MobileXT (and other comparison models like ResNet, MobileNet, ViT) with standard training parameters (batch size=128, momentum=0.9, weight decay=0.005, etc.). 
+
+\subsection{Results}
+
+They found that \textbf{MobileXT-XXS} (the smallest version) achieved about \textbf{99.1\% accuracy} on the test set, 
+outperforming bigger networks but with only \textbf{1.27 million} parameters. 
+They also used \emph{Grad-CAM} to visualize what regions the model focuses on, showing tight attention on actual solder shapes.
+
+\section{Applying These Ideas to Real Time PCB Soldering System}
+
+We want to build a system that:
+\begin{enumerate}
+    \item Inspects solder joints (and eventually corrects them) in real time, or near-real time.
+    \item Starts with a simpler \textbf{binary classification} (good vs.\ bad) to get a baseline. We could aim for around 70\% accuracy initially.
+    \item Expands to more categories (e.g., bridging, missing solder, insufficient solder, etc.) once we collect more data.
+\end{enumerate}
+
+Let me outline a plan, step by step:
+
+\subsection{Step 1: Data Collection and Labeling}
+
+\begin{itemize}
+    \item \textbf{Gather Raw PCB Images:} We set up a consistent camera rig that captures the board under stable lighting.
+    \item \textbf{Apply Morphological Segmentation:} We can replicate the paper’s approach 
+          (histogram equalization, HSV thresholding, median filtering, contour detection) 
+          to isolate each solder joint. 
+    \item \textbf{Label Joints:} 
+          For now, we can label them as \emph{good} or \emph{defective} if we only want a binary classification. 
+          Eventually, we can add more detail (the exact defect type).
+\end{itemize}
+
+\subsection{Step 2: Baseline Classification Model}
+
+\begin{itemize}
+    \item If CoCo does not recognize the solders, we can train a small lightweight CNN (like \emph{MobileNetV2} or \emph{MobileNetV3}) on the cropped patches. See online 'Medium' Articles on MobileNet and open source codes.
+    \item If we have limited images, we should use data augmentation (random flips, rotations, slight brightness changes) to improve generalization.
+    \item Our target might be $\sim$70\% to 80\% accuracy on a test set for \emph{good vs.\ bad}. 
+          This is enough to demonstrate feasibility.
+\end{itemize}
+
+\subsection{Step 3: Scaling Up to More Classes or More Precision}
+
+Once we are comfortable with the pipeline, we can:
+
+\begin{itemize}
+    \item Introduce \emph{5-7 defect categories} (similar to the paper’s: bridging, missing solder, tip, etc.).
+    \item Potentially adopt or adapt \emph{MobileXT} from the research paper, which might yield higher accuracy and better real-time performance. 
+    \item Expand the dataset with more boards, more lighting conditions, or different camera angles to ensure the model is robust.
+\end{itemize}
+
+\subsection{Step 4: Real-Time Feedback and Correction}
+
+Our ultimate goal might be to \emph{automate rework or correction}: 
+\begin{itemize}
+    \item If the system spots a bridging defect, it can prompt a soldering iron or hot air station to reflow or remove extra solder.
+    \item If it detects insufficient solder, it can quickly dispense a bit more solder and reflow.
+\end{itemize}
+Achieving this in \emph{1 second or less} would require:
+\begin{itemize}
+    \item Keeping the classification model \textbf{lightweight} so inference is fast.
+    \item Possibly implementing parallel processing or hardware acceleration (e.g., using an embedded GPU like Jetson Nano or similar).
+    \item Ensuring that the mechanical soldering apparatus can respond quickly and precisely in hardware.
+\end{itemize}
+
+\subsection{Potential Challenges}
+
+\begin{itemize}
+    \item \textbf{Data Scarcity:} We might not find a big public dataset for through-hole or surface-mount solder joints. We have to capture our own images.
+    \item \textbf{Lighting Variation:} Reflective metallic surfaces can cause glare and inconsistent appearances. Good lighting control is key.
+    \item \textbf{PCB Variation:} Different PCB finishes (HASL, ENIG, OSP, etc.) or solder types (lead-free vs. leaded) might require re-tuning thresholds or additional training data.
+\end{itemize}
+
+
+\section{Further Explanation of the Math }
+
+If you are unaware of some of these Image Processing topics (they are discussed in CE 4TN4 which you are encouraged to take), here is some more depth:
+\subsection{Morphological Thresholding in More Detail }
+\label{sec:morphological-detail}
+
+\textbf{Thresholding} is a basic method in image processing to decide which pixels belong to a region of interest (foreground) and which do not (background). 
+For example, we might say:
+\[
+   \text{Mask}(i,j) = 
+   \begin{cases}
+       1, & \text{if } H_{i,j} \leq T_H \text{ and } V_{i,j} \geq T_V, \\
+       0, & \text{otherwise},
+   \end{cases}
+\]
+where $H_{i,j}$ is the Hue value at pixel $(i,j)$, $V_{i,j}$ is the Value (brightness) at pixel $(i,j)$. 
+The thresholds $T_H, T_V$ come from Otsu’s method or manual tuning.
+
+\paragraph{Why Morphology?}
+After thresholding, we apply \emph{morphological} operations like \textbf{median filtering} to clean up noise. 
+A median filter basically replaces each pixel with the \emph{median} of its surrounding neighborhood. 
+If there is a small black or white ``speck,'' it tends to vanish, improving segmentation quality.
+
+\paragraph{Contour Detection:}
+After we have a binary mask, \textbf{contour detection} using OpenCV will find connected blobs. 
+Each blob is presumably \emph{one solder joint}. 
+A bounding rectangle around that blob lets us crop the relevant area from the full image.
+
+\section{Conclusions and Our Roadmap}
+The research paper essentially performs:
+\begin{itemize}
+    \item \textbf{Morphological Segmentation} (Stage 1) helps isolate each solder joint quickly, 
+          reducing the subsequent classification problem to small patches.
+    \item \textbf{Lightweight Hybrid Network} (MobileXT, Stage 2) yields \textbf{high accuracy} (over 99\% in their experiments) 
+          while staying compact enough for real-time usage. Uses XCA, inverted residual convulotional strides and transfomer blocks in their architecture.
+\end{itemize}
+
+For our \textbf{PCB soldering robot project}, here is a proposed plan:
+\begin{enumerate}
+    \item \textbf{Collect Our Own Dataset}: We will photograph boards, apply the morphological approach, label each joint. 
+          For a start, we might do just \emph{Good vs.\ Bad} classification.
+    \item \textbf{Train a Baseline Model}: Something like a small CNN. 
+          Aim for around 70\%--80\% accuracy to confirm the pipeline works.
+    \item \textbf{Advance to Multi-Defect Classification}: We can adopt or adapt \emph{MobileXT} for bridging, missing solder, etc., 
+          as we grow our labeled dataset.
+    \item \textbf{Real-Time Correction}: Integrate this into the robot’s control loop so that it \emph{immediately} tries to fix defects by adding or removing solder.
+\end{enumerate}
+
+We expect challenges (e.g., limited open-source data for \emph{through-hole} solder joints, lighting variations, and different PCB finishes). 
+But the pipeline proposed by Zhang \emph{et al.} provides a clear blueprint for a robust, high-accuracy system that remains practical to deploy. 
+We anticipate that by following and expanding on these methods, we can achieve an automated solder-joint inspection and correction system in the near future.
+
+\end{document}
+```
